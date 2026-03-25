@@ -1,0 +1,13 @@
+programs:
+  - name: hello
+    args: "World"
+  - name: addition
+    args: "12345+6789"
+  - name: collatz
+    args: "7"
+  - name: fibonacci
+    args: "10"
+  - name: min_cost_matching
+    args: "3 9 2 7 6 4 3 5 8 1"
+  - name: sudoku
+    args: "530070000600195000098000060800060003400803001700020006060000280000419005000080079"

@@ -1,0 +1,76 @@
+[project]
+name = "transformer-vm"
+version = "0.1.0"
+description = "Analytically-constructed transformer that simulates a WebAssembly VM"
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "highspy>=1.13.1",
+    "ninja>=1.13.0",
+    "numpy>=2.0.0",
+    "pulp>=3.3.0",
+    "pybind11>=3.0.2",
+    "pyyaml>=6.0.3",
+    "setuptools>=82.0.0",
+    "torch>=2.10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Percepta-Core/transformer-vm"
+Repository = "https://github.com/Percepta-Core/transformer-vm"
+Issues = "https://github.com/Percepta-Core/transformer-vm/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.9.0",
+    "pre-commit>=4.0",
+]
+
+[project.scripts]
+wasm-compile = "transformer_vm.compilation.compile_wasm:main"
+wasm-run = "transformer_vm.runner:main"
+wasm-eval = "transformer_vm.evaluator:main"
+wasm-build = "transformer_vm.build:main"
+wasm-specialize = "transformer_vm.specialize:main"
+wasm-reference = "transformer_vm.wasm.reference:main"
+
+[build-system]
+requires = ["setuptools>=82.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["transformer_vm*"]
+
+[tool.setuptools.package-data]
+"transformer_vm" = [
+    "data/*.txt",
+    "data/*.yaml",
+    "examples/*.c",
+    "examples/*.yaml",
+    "compilation/runtime.h",
+    "attention/hull2d_cht.h",
+    "attention/hull_ext.cpp",
+    "attention/CMakeLists.txt",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["transformer_vm"]
+
+[tool.pytest.ini_options]
+testpaths = ["transformer_vm/tests"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests",
+]

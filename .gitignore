@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.so
+*.o
+*.bin
+*.wasm
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.claude/
+/plan.yaml
+/allocation.yaml
+
+# Generated data files (auto-compiled from examples/)
+transformer_vm/data/
+
+# C++ build output
+transformer
