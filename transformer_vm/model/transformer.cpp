@@ -26,6 +26,11 @@
 #elif defined(USE_OPENBLAS)
 #include <cblas.h>
 #define HAVE_BLAS 1
+#elif __has_include(<cblas.h>)
+extern "C" {
+#include <cblas.h>
+}
+#define HAVE_BLAS 1
 #endif
 
 #include "hull2d_cht.h"
@@ -280,6 +285,7 @@ int main(int argc, char** argv) {
 #ifdef PROFILE_PHASES
     double t_embed = 0, t_qkv = 0, t_attn = 0, t_out = 0, t_ffn = 0, t_head = 0;
 #endif
+    std::vector<int> last_ids;  // save last program's tokens for batched verify
 
     for (int ai = 2; ai < argc; ai++) {
         if (strstr(argv[ai], "_ref")) continue;
@@ -495,6 +501,7 @@ int main(int argc, char** argv) {
         auto t1 = Clock::now();
         double dt = secs(t0, t1);
         int nt = (int)ids.size(), no = 0;
+        last_ids = ids;  // save for batched test
         std::string output_bytes;
         for (int i : ids) {
             const auto& s = m.name[i];
@@ -591,6 +598,126 @@ int main(int argc, char** argv) {
                 putchar('\n');
             }
         }
+    }
+
+    // ── Batched verification: dgemm projections + sequential hull ────
+    // Save the last program's ids for the batched test
+    if (total_tok > 0 && !brute && !last_ids.empty()) {
+        int T = (int)last_ids.size();
+        printf("\n── Batched verify (%d tokens) ──\n", T);
+
+        std::vector<double> X(T * D, 0.0);
+        for (int t = 0; t < T; t++) {
+            const double* e = m.emb + last_ids[t] * D;
+            std::copy(e, e + D, &X[t * D]);
+            add_position_encoding(&X[t * D], t);
+        }
+
+        // Fresh hulls for verification
+        std::vector<HardAttentionHead> vhulls(L * H);
+
+        std::vector<double> QKV(T * 3*D), HO(T * D), AO(T * D);
+        std::vector<double> FF(T * 2*F), GV(T * F), FO(T * D);
+        int vseq = 0;
+        double bt_proj = 0, bt_hull = 0;
+
+        auto bstart = Clock::now();
+        for (int l = 0; l < L; l++) {
+            const auto& ly = m.ly[l];
+
+            // Batch QKV: dgemm  X[T,D] @ W_qkv^T[D,3D] -> QKV[T,3D]
+            auto pa = Clock::now();
+#if defined(HAVE_BLAS) && !defined(NO_BLAS)
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        T, 3*D, D, 1.0, X.data(), D, ly.qkv, D, 0.0, QKV.data(), 3*D);
+#else
+            for (int t = 0; t < T; t++)
+                matvec(ly.qkv, &X[t*D], &QKV[t*3*D], 3*D, D);
+#endif
+            auto pb = Clock::now();
+
+            // Hull: one parallel region, each thread owns a subset of heads across ALL positions
+            // No barriers needed: head h's hull is independent of head h'.
+            std::fill(HO.begin(), HO.end(), 0.0);
+            int vseq_base = vseq;
+            #pragma omp parallel for schedule(static)
+            for (int h = 0; h < H; h++) {
+                TieBreak tb = (!m.head_tb.empty()) ? m.head_tb[l][h] : TieBreak::AVERAGE;
+                for (int t = 0; t < T; t++) {
+                    double *k = &QKV[t*3*D + D], *v = k + D, *q = &QKV[t*3*D];
+                    vhulls[l*H+h].insert(&k[h*2], &v[h*2], vseq_base + t);
+                    vhulls[l*H+h].query(&q[h*2], tb, &HO[t*D + h*2]);
+                }
+            }
+            vseq += T;
+            auto pc = Clock::now();
+
+            // Batch out projection: dgemm
+#if defined(HAVE_BLAS) && !defined(NO_BLAS)
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        T, D, D, 1.0, HO.data(), D, ly.out, D, 0.0, AO.data(), D);
+#else
+            for (int t = 0; t < T; t++)
+                matvec(ly.out, &HO[t*D], &AO[t*D], D, D);
+#endif
+            for (int i = 0; i < T*D; i++) X[i] += AO[i];
+
+            // Erase attention slots
+            if (!m.attn_erase.empty())
+                for (int s : m.attn_erase[l])
+                    for (int t = 0; t < T; t++) X[t*D + s] = 0.0;
+
+            // Batch FFN: dgemm
+#if defined(HAVE_BLAS) && !defined(NO_BLAS)
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        T, 2*F, D, 1.0, X.data(), D, ly.fi, D, 0.0, FF.data(), 2*F);
+#else
+            for (int t = 0; t < T; t++)
+                matvec(ly.fi, &X[t*D], &FF[t*2*F], 2*F, D);
+#endif
+            for (int t = 0; t < T; t++)
+                for (int j = 0; j < F; j++)
+                    GV[t*F+j] = (FF[t*2*F+j] > 0 ? FF[t*2*F+j] : 0.0) * FF[t*2*F+F+j];
+#if defined(HAVE_BLAS) && !defined(NO_BLAS)
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        T, D, F, 1.0, GV.data(), F, ly.fo, F, 0.0, FO.data(), D);
+#else
+            for (int t = 0; t < T; t++)
+                matvec(ly.fo, &GV[t*F], &FO[t*D], D, F);
+#endif
+            for (int i = 0; i < T*D; i++) X[i] += FO[i];
+
+            // Erase FFN slots
+            if (!m.ffn_erase.empty())
+                for (int s : m.ffn_erase[l])
+                    for (int t = 0; t < T; t++) X[t*D + s] = 0.0;
+
+            auto pd = Clock::now();
+            bt_proj += secs(pa, pb) + secs(pc, pd);
+            bt_hull += secs(pb, pc);
+        }
+        auto bend = Clock::now();
+        double bt_total = secs(bstart, bend);
+
+        // Verify: check argmax at last position
+        const auto& sp = m.head_sp;
+        int last = T - 2;  // second-to-last position predicts last token
+        double bs = -1e300; int best = 0;
+        for (int i = 0; i < sp.rows; i++) {
+            double s = 0;
+            for (int k = sp.ptr[i]; k < sp.ptr[i+1]; k++)
+                s += sp.val[k] * X[last*D + sp.col[k]];
+            if (s > bs) { bs = s; best = i; }
+        }
+        bool match = (best == last_ids[T-1]);
+
+        printf("  Batched total:  %.3fs (%7.0f tok/s)\n", bt_total, T/bt_total);
+        printf("  Batched proj:   %.3fs (%4.1f%%)\n", bt_proj, 100*bt_proj/bt_total);
+        printf("  Batched hull:   %.3fs (%4.1f%%)\n", bt_hull, 100*bt_hull/bt_total);
+        printf("  Spot check: %s (pos %d: pred=%s, actual=%s)\n",
+               match ? "OK" : "MISMATCH", last,
+               m.name[best].c_str(), m.name[last_ids[T-1]].c_str());
+        printf("  Speedup vs sequential: %.2fx\n", total_time / bt_total);
     }
 
     printf("\n%d passed, %d failed, %d no-ref\n", passed, failed, skipped);
