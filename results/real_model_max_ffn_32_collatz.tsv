@@ -1,0 +1,5 @@
+binary	n_tok	n_ops	engine_s	tok_s
+transformer_naive	24071	4443	1.1800	20394.0
+transformer_blas	24071	4443	0.7400	32358.0
+transformer_sparse	24071	4443	0.5200	46511.0
+# sparse_vs_naive	2.2806	sparse_vs_blas	1.4374	identical_streams	True
