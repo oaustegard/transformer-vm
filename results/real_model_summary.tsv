@@ -1,0 +1,7 @@
+config	program	D	L	H	F	proj_sparsity	naive_tok_s	blas_tok_s	sparse_tok_s	sp_over_naive	sp_over_blas	identical_streams
+default	collatz	38	7	19	47	0.986	10021	17805	32759	3.27	1.84	True
+default	min_cost_matching	38	7	19	47	0.986	10328	17036	33291	3.22	1.95	True
+no_reuse	collatz	98	7	49	32	0.997	2531	5697	15090	5.96	2.65	True
+no_reuse	min_cost_matching	98	7	49	32	0.997	2499	5875	15602	6.24	2.66	True
+max_ffn_32	collatz	38	7	19	41	0.985	11008	18364	30970	2.81	1.69	True
+max_ffn_32	min_cost_matching	38	7	19	41	0.985	10957	19522	33442	3.05	1.71	True
