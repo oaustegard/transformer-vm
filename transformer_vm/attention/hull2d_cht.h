@@ -29,9 +29,79 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <limits>
+#include <memory>
 #include <set>
 #include <vector>
+
+// ═══════════════════════════════════════════════════════════════════════
+//  PoolAlloc — thread-local free-list allocator for std::multiset nodes.
+//
+//  std::multiset performs one heap allocation per inserted node. For
+//  CHT inserts in hot attention, that malloc latency dominates the
+//  phase (jemalloc preload alone gave +11 % on a sandbox baseline,
+//  which confirms malloc is the bottleneck). This allocator carves a
+//  pool of fixed-size slots and replaces malloc/free with free-list
+//  push/pop.
+//
+//  Storage is in static thread_local members. All copies of
+//  PoolAlloc<T> for the same T share one pool; each rebound T has
+//  its own pool. Single-threaded by construction (engine runs on
+//  one thread), so no synchronization.
+// ═══════════════════════════════════════════════════════════════════════
+
+template<class T>
+class PoolAlloc {
+public:
+    using value_type = T;
+
+    PoolAlloc() noexcept = default;
+    template<class U>
+    PoolAlloc(const PoolAlloc<U>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        if (n != 1) return static_cast<T*>(::operator new(n * sizeof(T)));
+        if (free_head_ == nullptr) refill();
+        Slot* s = free_head_;
+        free_head_ = s->next;
+        return reinterpret_cast<T*>(s);
+    }
+
+    void deallocate(T* p, std::size_t n) noexcept {
+        if (n != 1) { ::operator delete(p); return; }
+        Slot* s = reinterpret_cast<Slot*>(p);
+        s->next = free_head_;
+        free_head_ = s;
+    }
+
+private:
+    union Slot {
+        Slot* next;
+        alignas(T) unsigned char raw[sizeof(T)];
+    };
+    static constexpr std::size_t BLOCK = 256;
+
+    static thread_local Slot* free_head_;
+    static thread_local std::vector<std::unique_ptr<Slot[]>> blocks_;
+
+    static void refill() {
+        auto block = std::make_unique<Slot[]>(BLOCK);
+        for (std::size_t i = 0; i < BLOCK; i++) {
+            block[i].next = free_head_;
+            free_head_ = &block[i];
+        }
+        blocks_.push_back(std::move(block));
+    }
+};
+
+template<class T> thread_local typename PoolAlloc<T>::Slot* PoolAlloc<T>::free_head_ = nullptr;
+template<class T> thread_local std::vector<std::unique_ptr<typename PoolAlloc<T>::Slot[]>> PoolAlloc<T>::blocks_;
+
+template<class T, class U>
+bool operator==(const PoolAlloc<T>&, const PoolAlloc<U>&) noexcept { return true; }
+template<class T, class U>
+bool operator!=(const PoolAlloc<T>&, const PoolAlloc<U>&) noexcept { return false; }
 
 enum class TieBreak { AVERAGE, LATEST };
 
@@ -110,7 +180,7 @@ struct _HullCHT {
         bool operator<(long double x) const { return p < x; }
     };
 
-    using Set = std::multiset<Line, std::less<>>;
+    using Set = std::multiset<Line, std::less<>, PoolAlloc<Line>>;
     using It  = Set::iterator;
 
     Set lines;

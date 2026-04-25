@@ -1,7 +1,8 @@
-config	program	D	L	H	F	proj_sparsity	naive_tok_s	blas_tok_s	sparse_tok_s	sp_over_naive	sp_over_blas	identical_streams
-default	collatz	38	7	19	47	0.986	10021	17805	32759	3.27	1.84	True
-default	min_cost_matching	38	7	19	47	0.986	10328	17036	33291	3.22	1.95	True
-no_reuse	collatz	98	7	49	32	0.997	2531	5697	15090	5.96	2.65	True
-no_reuse	min_cost_matching	98	7	49	32	0.997	2499	5875	15602	6.24	2.66	True
-max_ffn_32	collatz	38	7	19	41	0.985	11008	18364	30970	2.81	1.69	True
-max_ffn_32	min_cost_matching	38	7	19	41	0.985	10957	19522	33442	3.05	1.71	True
+config	prog	naive_tok_s	blas_tok_s	sparse_tok_s	sp_vs_naive	sp_vs_blas
+default	collatz	19849.0000	30903.0000	45476.0000	2.2911	1.4716
+default	mcm	20840.0000	32725.0000	46935.0000	2.2522	1.4342
+default	sudoku	18495.0000	27478.0000	37828.0000	2.0453	1.3767
+no_reuse	collatz	5089.0000	7534.0000	26177.0000	5.1438	3.4745
+no_reuse	mcm	5145.0000	7627.0000	27184.0000	5.2836	3.5642
+max_ffn_32	collatz	20394.0000	32358.0000	46511.0000	2.2806	1.4374
+max_ffn_32	mcm	21214.0000	32817.0000	48909.0000	2.3055	1.4904

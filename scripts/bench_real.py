@@ -44,10 +44,6 @@ def run_engine(binary: str, model: Path, prog: Path, max_gen: int) -> dict:
     engine_time = float(m.group(3)) if m else 0.0
     tok_s = float(m.group(4)) if m else 0.0
 
-    pm = re.search(r"proj:\s+([\d.]+)s\s+\(([\d.]+)%\)", out)
-    proj_s = float(pm.group(1)) if pm else 0.0
-    proj_pct = float(pm.group(2)) if pm else 0.0
-
     return {
         "binary": binary,
         "wall_s": wall,
@@ -55,8 +51,6 @@ def run_engine(binary: str, model: Path, prog: Path, max_gen: int) -> dict:
         "n_tok": n_tok,
         "n_ops": n_ops,
         "tok_s": tok_s,
-        "proj_s": proj_s,
-        "proj_pct": proj_pct,
         "stdout": out,
         "stderr": proc.stderr,
         "rc": proc.returncode,
@@ -73,8 +67,7 @@ def fmt(d: dict) -> str:
         f"  {d['binary']:<22}  "
         f"{d['n_tok']:>6} tok  "
         f"{d['engine_s']:>7.3f}s  "
-        f"{d['tok_s']:>10,.0f} tok/s  "
-        f"proj={d['proj_s']*1000:>7.1f}ms ({d['proj_pct']:>4.1f}%)"
+        f"{d['tok_s']:>10,.0f} tok/s"
     )
 
 
@@ -157,14 +150,12 @@ def main() -> int:
 
     out_tsv = RESULTS / f"real_model_{args.label}.tsv"
     with out_tsv.open("w") as f:
-        f.write(
-            "binary\tn_tok\tn_ops\tengine_s\ttok_s\tproj_s\tproj_pct\n"
-        )
+        f.write("binary\tn_tok\tn_ops\tengine_s\ttok_s\n")
         for b in binaries:
             r = best_per_bin[b]
             f.write(
                 f"{b}\t{r['n_tok']}\t{r['n_ops']}\t{r['engine_s']:.4f}\t"
-                f"{r['tok_s']:.1f}\t{r['proj_s']:.4f}\t{r['proj_pct']:.2f}\n"
+                f"{r['tok_s']:.1f}\n"
             )
         f.write(
             f"# sparse_vs_naive\t{sparse_ts/naive_ts:.4f}\t"

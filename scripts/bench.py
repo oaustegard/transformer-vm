@@ -46,19 +46,12 @@ def run_engine(binary: str, model: Path, prog: Path, max_gen: int) -> dict:
     engine_time = float(m.group(3)) if m else 0.0
     tok_s = float(m.group(4)) if m else 0.0
 
-    # Parse projection-time fraction
-    pm = re.search(r"proj:\s+([\d.]+)s\s+\(([\d.]+)%\)", out)
-    proj_s = float(pm.group(1)) if pm else 0.0
-    proj_pct = float(pm.group(2)) if pm else 0.0
-
     return {
         "binary": binary,
         "wall_s": wall,
         "engine_s": engine_time,
         "n_tok": n_tok,
         "tok_s": tok_s,
-        "proj_s": proj_s,
-        "proj_pct": proj_pct,
         "stdout": out,
     }
 
@@ -74,8 +67,7 @@ def fmt(d: dict) -> str:
         f"  {d['binary']:<22}  "
         f"{d['n_tok']:>4} tok  "
         f"{d['engine_s']:>6.3f}s  "
-        f"{d['tok_s']:>10,.0f} tok/s  "
-        f"proj={d['proj_s']*1000:>6.1f}ms ({d['proj_pct']:>4.1f}%)"
+        f"{d['tok_s']:>10,.0f} tok/s"
     )
 
 
@@ -174,9 +166,6 @@ def main() -> int:
             "naive_tok_s": naive_ts,
             "blas_tok_s": blas_ts,
             "sparse_tok_s": sparse_ts,
-            "naive_proj_pct": best_per_bin["transformer_naive"]["proj_pct"],
-            "blas_proj_pct": best_per_bin["transformer_blas"]["proj_pct"],
-            "sparse_proj_pct": best_per_bin["transformer_sparse"]["proj_pct"],
         })
 
     # Summary table
@@ -195,10 +184,9 @@ def main() -> int:
 
     # Persist as TSV
     with (RESULTS / "sweep.tsv").open("w") as f:
-        f.write("sparsity\tnaive_tok_s\tblas_tok_s\tsparse_tok_s\tnaive_proj_pct\tblas_proj_pct\tsparse_proj_pct\n")
+        f.write("sparsity\tnaive_tok_s\tblas_tok_s\tsparse_tok_s\n")
         for r in summary_rows:
-            f.write(f"{r['sparsity']}\t{r['naive_tok_s']}\t{r['blas_tok_s']}\t{r['sparse_tok_s']}\t"
-                    f"{r['naive_proj_pct']}\t{r['blas_proj_pct']}\t{r['sparse_proj_pct']}\n")
+            f.write(f"{r['sparsity']}\t{r['naive_tok_s']}\t{r['blas_tok_s']}\t{r['sparse_tok_s']}\n")
     print(f"\n  → results written to {RESULTS / 'sweep.tsv'}")
     return 0
 

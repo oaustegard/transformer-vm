@@ -230,6 +230,16 @@ static inline double secs(TP a, TP b) {
     return std::chrono::duration<double>(b - a).count();
 }
 
+// Per-phase timers are only compiled into the hot loop when -DPROFILE_PHASES
+// is defined. Default builds have zero clock-read overhead per token.
+#ifdef PROFILE_PHASES
+  #define PHASE_TS(var) auto var = Clock::now()
+  #define PHASE_ADD(acc, a, b) acc += secs(a, b)
+#else
+  #define PHASE_TS(var) ((void)0)
+  #define PHASE_ADD(acc, a, b) ((void)0)
+#endif
+
 // ── Main ───────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
@@ -263,7 +273,10 @@ int main(int argc, char** argv) {
     int D = m.D, F = m.F, H = m.H, L = m.L;
     int passed = 0, failed = 0, skipped = 0;
     long total_tok = 0, total_ops = 0;
-    double total_time = 0, t_proj = 0, t_hull = 0, t_head = 0;
+    double total_time = 0;
+#ifdef PROFILE_PHASES
+    double t_embed = 0, t_qkv = 0, t_attn = 0, t_out = 0, t_ffn = 0, t_head = 0;
+#endif
 
     for (int ai = 2; ai < argc; ai++) {
         if (strstr(argv[ai], "_ref")) continue;
@@ -335,9 +348,12 @@ int main(int argc, char** argv) {
         auto t0 = Clock::now();
 
         for (int pos = 0; pos < plen + max_gen; pos++) {
+            PHASE_TS(t_pos0);
             const double* e = m.emb + ids[pos] * D;
             std::copy(e, e + D, x.data());
             add_position_encoding(x.data(), pos);
+            PHASE_TS(t_pos1);
+            PHASE_ADD(t_embed, t_pos0, t_pos1);
 
             for (int l = 0; l < L; l++) {
                 const auto& ly = m.ly[l];
@@ -345,13 +361,13 @@ int main(int argc, char** argv) {
                 const auto& sly = m.sly[l];
 #endif
 
-                auto ta = Clock::now();
+                PHASE_TS(ta);
 #ifdef USE_SPARSE_PROJ
                 sparse_matvec(sly.qkv, x.data(), qkv.data());
 #else
                 matvec(ly.qkv, x.data(), qkv.data(), 3*D, D);
 #endif
-                auto tb = Clock::now();
+                PHASE_TS(tb);
 
                 double *q = qkv.data(), *k = q + D, *v = k + D;
                 int base = l * H;
@@ -366,33 +382,40 @@ int main(int argc, char** argv) {
                     }
                 }
                 seq++;
-                auto tc = Clock::now();
+                PHASE_TS(tc);
 
 #ifdef USE_SPARSE_PROJ
                 sparse_matvec(sly.out, ho.data(), ao.data());
                 for (int i = 0; i < D; i++) x[i] += ao[i];
+#else
+                matvec(ly.out, ho.data(), ao.data(), D, D);
+                for (int i = 0; i < D; i++) x[i] += ao[i];
+#endif
+                PHASE_TS(td);
+
+#ifdef USE_SPARSE_PROJ
                 sparse_matvec(sly.fi, x.data(), ff.data());
                 for (int i = 0; i < F; i++)
                     gv[i] = (ff[i] > 0 ? ff[i] : 0.0) * ff[F + i];
                 sparse_matvec(sly.fo, gv.data(), fo.data());
                 for (int i = 0; i < D; i++) x[i] += fo[i];
 #else
-                matvec(ly.out, ho.data(), ao.data(), D, D);
-                for (int i = 0; i < D; i++) x[i] += ao[i];
                 matvec(ly.fi, x.data(), ff.data(), 2*F, D);
                 for (int i = 0; i < F; i++)
                     gv[i] = (ff[i] > 0 ? ff[i] : 0.0) * ff[F + i];
                 matvec(ly.fo, gv.data(), fo.data(), D, F);
                 for (int i = 0; i < D; i++) x[i] += fo[i];
 #endif
-                auto td = Clock::now();
+                PHASE_TS(te);
 
-                t_proj += secs(ta, tb) + secs(tc, td);
-                t_hull += secs(tb, tc);
+                PHASE_ADD(t_qkv,  ta, tb);
+                PHASE_ADD(t_attn, tb, tc);
+                PHASE_ADD(t_out,  tc, td);
+                PHASE_ADD(t_ffn,  td, te);
             }
 
             if (pos + 1 == (int)ids.size()) {
-                auto te = Clock::now();
+                PHASE_TS(th0);
                 const auto& sp = m.head_sp;
                 int best = 0; double bs = -1e300;
                 for (int i = 0; i < sp.rows; i++) {
@@ -401,14 +424,14 @@ int main(int argc, char** argv) {
                         s += sp.val[k] * x[sp.col[k]];
                     if (s > bs) { bs = s; best = i; }
                 }
-                auto tf = Clock::now();
-                t_head += secs(te, tf);
+                PHASE_TS(th1);
+                PHASE_ADD(t_head, th0, th1);
                 ids.push_back(best);
 
                 if (trace_every > 0) {
                     int gen = pos + 1 - plen;
                     if (gen % trace_every == 0 || best == m.stop) {
-                        double elapsed = secs(t0, tf);
+                        double elapsed = secs(t0, Clock::now());
                         fprintf(stderr, "[%7d %7.3fs %6.0f tok/s] %s\n",
                                 gen, elapsed,
                                 gen > 0 ? gen / elapsed : 0.0,
@@ -523,21 +546,33 @@ int main(int argc, char** argv) {
 
     printf("\n%d passed, %d failed, %d no-ref\n", passed, failed, skipped);
     if (total_time > 0) {
-        double t_misc = total_time - t_proj - t_hull - t_head;
         printf("\nBenchmark: %ld tok, %ld ops, %.2fs\n"
                "  %.0f tok/s, %.0f wasm-ops/s\n",
                total_tok, total_ops, total_time,
                total_tok / total_time,
                total_ops > 0 ? total_ops / total_time : 0.0);
+#ifdef PROFILE_PHASES
+        double t_proj = t_qkv + t_out + t_ffn;
+        double t_acc  = t_embed + t_proj + t_attn + t_head;
+        double t_misc = total_time - t_acc;
         printf("\nTime breakdown:\n"
-               "  proj:  %.3fs (%4.1f%%)\n"
-               "  hull:  %.3fs (%4.1f%%)\n"
+               "  embed: %.3fs (%4.1f%%)\n"
+               "  qkv:   %.3fs (%4.1f%%)\n"
+               "  attn:  %.3fs (%4.1f%%)\n"
+               "  out:   %.3fs (%4.1f%%)\n"
+               "  ffn:   %.3fs (%4.1f%%)\n"
                "  head:  %.3fs (%4.1f%%)\n"
-               "  misc:  %.3fs (%4.1f%%)\n",
-               t_proj, 100*t_proj/total_time,
-               t_hull, 100*t_hull/total_time,
-               t_head, 100*t_head/total_time,
-               t_misc, 100*t_misc/total_time);
+               "  misc:  %.3fs (%4.1f%%)\n"
+               "  proj:  %.3fs (%4.1f%%)   [qkv+out+ffn aggregate]\n",
+               t_embed, 100*t_embed/total_time,
+               t_qkv,   100*t_qkv  /total_time,
+               t_attn,  100*t_attn /total_time,
+               t_out,   100*t_out  /total_time,
+               t_ffn,   100*t_ffn  /total_time,
+               t_head,  100*t_head /total_time,
+               t_misc,  100*t_misc /total_time,
+               t_proj,  100*t_proj /total_time);
+#endif
     }
     return failed ? 1 : 0;
 }
