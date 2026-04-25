@@ -1,0 +1,5 @@
+binary	n_tok	n_ops	engine_s	tok_s	proj_s	proj_pct
+transformer_naive	40171	5618	3.6700	10957.0	2.3680	64.60
+transformer_blas	40171	5618	2.0600	19522.0	0.7360	35.80
+transformer_sparse	40171	5618	1.2000	33442.0	0.1250	10.40
+# sparse_vs_naive	3.0521	sparse_vs_blas	1.7130	identical_streams	True

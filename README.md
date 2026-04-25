@@ -242,6 +242,46 @@ graph TD
   root --> testsMod
 ```
 
+## Sparse Projections (`-DUSE_SPARSE_PROJ`)
+
+The analytically-constructed weights are sparse by construction (~98–99.7%
+zeros in the per-layer projections on real `model.bin`). Building the
+engine with `-DUSE_SPARSE_PROJ` replaces the four per-layer dense matvecs
+(qkv, out, fi, fo) with CSR sparse matvecs.
+
+```bash
+ATTN=transformer_vm/attention; SRC=transformer_vm/model/transformer.cpp
+COM="-std=c++17 -O3 -march=native -I $ATTN"
+g++ $COM                   $SRC -o build/transformer_naive
+g++ $COM -DUSE_OPENBLAS    $SRC -o build/transformer_blas -lopenblas      # Linux
+g++ $COM -DUSE_SPARSE_PROJ $SRC -o build/transformer_sparse
+```
+
+Synthetic-weight crossover is at ~75% sparsity (`results/sweep.tsv`).
+Real `model.bin` from `transformer_vm.build` lives well above that:
+
+| config         | proj sparsity | naive   | BLAS    | sparse  | sp/naive | sp/BLAS |
+|----------------|--------------:|--------:|--------:|--------:|---------:|--------:|
+| default        | 98.6 %        | 10,328  | 17,036  | 33,291  | 3.22×    | 1.95×   |
+| `--no-reuse`   | 99.7 %        |  2,499  |  5,875  | 15,602  | 6.24×    | 2.66×   |
+| `--max-ffn=32` | 98.5 %        | 10,957  | 19,522  | 33,442  | 3.05×    | 1.71×   |
+
+Single-thread, Linux + OpenBLAS, `min_cost_matching` workload (~40K
+generated tokens). All three binaries produce byte-identical predicted
+token streams. Default-config sparse hits ~33K tok/s, edging past the
+30K headline number from the project demo. Full per-projection sparsity
+breakdowns and per-program TSVs in `results/real_model_*.tsv`.
+
+To replicate:
+
+```bash
+uv sync
+uv run python -m transformer_vm.build --save-weights=data/model.bin
+uv run python scripts/measure_sparsity.py data/model.bin
+uv run wasm-compile transformer_vm/examples/min_cost_matching.c -o data/mcm
+uv run python scripts/bench_real.py --model data/model.bin --prog data/mcm.txt --label run
+```
+
 ## Development
 
 ### Install dev dependencies

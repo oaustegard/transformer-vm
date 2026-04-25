@@ -25,6 +25,7 @@ transformer
 # Local benchmark artifacts (added on fork)
 /build/
 /data/
+/logs/
 /.venv/
 /transformer
 /model.bin
