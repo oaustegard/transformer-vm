@@ -16,6 +16,20 @@
  *     - upper:  max   (kx*m + ky)
  *     - lower:  min   (kx*m + ky)  implemented as max of (-(kx*m + ky))
  *
+ *   The upper-envelope and lower-envelope vertex sets are generally
+ *   different subsets of the same point cloud (a point on the upper hull
+ *   need not be on the lower hull), so both envelopes are intrinsically
+ *   needed; the two cannot be folded into one without storing every
+ *   line and giving up O(log h) query.
+ *
+ *   What we *can* fold is the per-insert allocation and metadata copy
+ *   (see PointAggregate / HardAttentionHead::insert below): one
+ *   per-key PointAggregate is shared between the upper and lower
+ *   envelopes' Line entries, halving the metadata write traffic and
+ *   eliminating the redundant duplicate-key book-keeping that
+ *   `_HullCHT::add_line` used to do twice per insert. Repeat inserts
+ *   of the same (kx, ky) skip both envelopes' walks entirely.
+ *
  * Performance profile vs hull2d.h:
  *   - Query: O(log h) in both.
  *   - Insert:
@@ -30,9 +44,14 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <set>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -154,6 +173,21 @@ struct HullMeta {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+//  PointAggregate — per-unique-key shared metadata block
+//
+//  One instance per unique (kx, ky) seen by a HardAttentionHead. Both
+//  the upper envelope's Line and the lower envelope's Line for that
+//  key hold a raw pointer into the head's PointAggregate pool, so any
+//  metadata update (subsequent insert of the same key) is visible
+//  through both envelopes immediately. The pool is owned by
+//  HardAttentionHead and lives until clear().
+// ═══════════════════════════════════════════════════════════════════════
+
+struct PointAggregate {
+    HullMeta meta;
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Dynamic convex hull trick for doubles (max envelope)
 //
 //  This is the classic "LineContainer" approach:
@@ -165,6 +199,12 @@ struct HullMeta {
 //    - The set ordering is by slope (Line < Line).
 //    - lower_bound(x) relies on the invariant that p is increasing with slope
 //      among the *envelope* lines (maintained by insertion logic).
+//
+//  Lines hold a raw PointAggregate* (the value metadata) rather than
+//  an inline HullMeta. The aggregate is allocated and deduplicated by
+//  HardAttentionHead, so add_line() is guaranteed never to be called
+//  with a duplicate (m, b) pair from this head — we do not need
+//  same-line merge logic here.
 // ═══════════════════════════════════════════════════════════════════════
 
 struct _HullCHT {
@@ -172,7 +212,7 @@ struct _HullCHT {
         double m = 0.0;   // slope
         double b = 0.0;   // intercept
         mutable long double p = 0.0L; // last x where this line is best (intersection with next)
-        HullMeta meta;
+        PointAggregate* point = nullptr;
 
         // Order by slope for set storage.
         bool operator<(const Line& o) const { return m < o.m; }
@@ -210,41 +250,30 @@ struct _HullCHT {
         return x->p >= y->p;
     }
 
-    // Insert a line (m,b) with pre-aggregated meta, keeping only the max envelope.
-    void add_line(double m, double b, const HullMeta& meta) {
+    // Insert a line (m,b) backed by a shared PointAggregate, keeping only
+    // the max envelope. The caller (HardAttentionHead) deduplicates by
+    // (kx, ky) before calling, so an exact (m, b) duplicate cannot
+    // occur. Same-slope-different-intercept is still possible (different
+    // (kx, ky) may give the same kx → same m).
+    void add_line(double m, double b, PointAggregate* point) {
         Line nl;
         nl.m = m;
         nl.b = b;
-        nl.meta = meta;
+        nl.point = point;
 
         auto it = lines.lower_bound(nl);
         if (it != lines.end() && it->m == m) {
-            if (it->b == b) {
-                // Same line: merge meta.
-                Line merged = *it;
-                merged.meta.merge(meta);
-                lines.erase(it);
-                nl = merged;
-            } else if (it->b >= b) {
+            if (it->b >= b) {
                 // Existing dominates for all x.
                 return;
-            } else {
-                // New dominates: replace.
-                lines.erase(it);
             }
+            // New dominates: replace.
+            lines.erase(it);
         } else if (it != lines.begin()) {
             auto it2 = std::prev(it);
             if (it2->m == m) {
-                if (it2->b == b) {
-                    Line merged = *it2;
-                    merged.meta.merge(meta);
-                    lines.erase(it2);
-                    nl = merged;
-                } else if (it2->b >= b) {
-                    return;
-                } else {
-                    lines.erase(it2);
-                }
+                if (it2->b >= b) return;
+                lines.erase(it2);
             }
         }
 
@@ -294,6 +323,10 @@ struct _HullCHT {
 //  is_upper=true : maintains max of (kx*m + ky)
 //  is_upper=false: maintains min of (kx*m + ky) via max of (-(kx*m + ky))
 //                 i.e., store (m,b)=(-kx,-ky)
+//
+//  Lines hold a PointAggregate* shared with the sibling HullHalf, so
+//  the wrapper does not own metadata storage — it only manages the
+//  envelope structure and routes queries.
 // ═══════════════════════════════════════════════════════════════════════
 
 struct HullHalf {
@@ -307,14 +340,14 @@ struct HullHalf {
     void clear() { cht.clear(); }
 
     // ─── Insert ──────────────────────────────────────────────────────
-    void insert(double kx, double ky, const double val[2], int seq = 0) {
-        HullMeta meta;
-        meta.add(val, seq);
+    // Adds a line corresponding to key (kx, ky) with shared metadata
+    // pointer. Caller has already populated point->meta.
+    void insert(double kx, double ky, PointAggregate* point) {
         if (is_upper) {
-            cht.add_line(kx, ky, meta);
+            cht.add_line(kx, ky, point);
         } else {
             // store -L so that max gives min of original
-            cht.add_line(-kx, -ky, meta);
+            cht.add_line(-kx, -ky, point);
         }
     }
 
@@ -326,7 +359,7 @@ struct HullHalf {
         if (qy == 0.0) {
             long double x = (qx >= 0 ? _HullCHT::INF : -_HullCHT::INF);
             auto it = cht.argmax(x);
-            it->meta.resolve(tb, out);
+            it->point->meta.resolve(tb, out);
             double kx_best = is_upper ? it->m : -it->m;
             if (score_out) {
                 double ky_best = is_upper ? it->b : -it->b;
@@ -344,7 +377,7 @@ struct HullHalf {
         double best_score = qx * kx_best + qy * ky_best;
 
         HullMeta combined;
-        combined.merge(best_it->meta);
+        combined.merge(best_it->point->meta);
 
         auto itL = best_it;
         while (itL != cht.lines.begin()) {
@@ -353,7 +386,7 @@ struct HullHalf {
             double ky_p = is_upper ? prev->b : -prev->b;
             double s = qx * kx_p + qy * ky_p;
             if (s == best_score) {
-                combined.merge(prev->meta);
+                combined.merge(prev->point->meta);
                 itL = prev;
             } else {
                 break;
@@ -366,7 +399,7 @@ struct HullHalf {
             double ky_p = is_upper ? itR->b : -itR->b;
             double s = qx * kx_p + qy * ky_p;
             if (s == best_score) {
-                combined.merge(itR->meta);
+                combined.merge(itR->point->meta);
                 ++itR;
             } else {
                 break;
@@ -382,6 +415,10 @@ struct HullHalf {
 
 // ═══════════════════════════════════════════════════════════════════════
 //  HardAttentionHead — full 2D hard-attention KV cache (drop-in)
+//
+//  Maintains both envelopes (upper for qy>0, lower for qy<0) sharing a
+//  single per-(kx,ky) PointAggregate pool. Repeat inserts of the same
+//  key skip both envelopes' walks and only update the shared meta.
 // ═══════════════════════════════════════════════════════════════════════
 
 struct HardAttentionHead {
@@ -394,9 +431,34 @@ struct HardAttentionHead {
     double   max_kx = -std::numeric_limits<double>::infinity();
     int      n = 0;
 
+    // Shared per-(kx, ky) metadata storage. deque preserves pointer
+    // stability across emplaces. Pointers handed to upper/lower's Lines
+    // are valid for the lifetime of the head (or until clear()).
+    std::deque<PointAggregate> point_pool;
+
+    // Dedup: (kx, ky) → PointAggregate*. Keys live inside the head's
+    // pool. Hash combines the bit patterns of the two doubles.
+    struct PairHash {
+        std::size_t operator()(const std::pair<double, double>& p) const noexcept {
+            std::uint64_t a, b;
+            std::memcpy(&a, &p.first, 8);
+            std::memcpy(&b, &p.second, 8);
+            // splitmix-style mix; rotate b so collisions across (a,b) vs
+            // (b,a) are unlikely
+            std::uint64_t h = a ^ ((b << 32) | (b >> 32));
+            h ^= h >> 33;
+            h *= 0xff51afd7ed558ccdULL;
+            h ^= h >> 33;
+            return (std::size_t)h;
+        }
+    };
+    std::unordered_map<std::pair<double, double>, PointAggregate*, PairHash> point_map;
+
     void clear() {
         upper.clear();
         lower.clear();
+        point_map.clear();
+        point_pool.clear();
         global = {};
         left_meta = {};
         right_meta = {};
@@ -422,8 +484,21 @@ struct HardAttentionHead {
         }
         if (key[0] == max_kx) right_meta.add(val, seq);
 
-        upper.insert(key[0], key[1], val, seq);
-        lower.insert(key[0], key[1], val, seq);
+        auto k = std::make_pair(key[0], key[1]);
+        auto it = point_map.find(k);
+        if (it == point_map.end()) {
+            // New (kx, ky): allocate aggregate and add to both envelopes.
+            point_pool.emplace_back();
+            PointAggregate* p = &point_pool.back();
+            p->meta.add(val, seq);
+            point_map.emplace(k, p);
+            upper.insert(key[0], key[1], p);
+            lower.insert(key[0], key[1], p);
+        } else {
+            // Repeat (kx, ky): both envelopes already point at the
+            // shared aggregate; just update the meta in place.
+            it->second->meta.add(val, seq);
+        }
         n++;
     }
 
