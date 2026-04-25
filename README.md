@@ -272,6 +272,18 @@ token streams. Default-config sparse hits ~33K tok/s, edging past the
 30K headline number from the project demo. Full per-projection sparsity
 breakdowns and per-program TSVs in `results/real_model_*.tsv`.
 
+The patch also adds a fair Linux dense baseline. Pre-patch, the C++ engine
+gated BLAS on `#ifdef __APPLE__` only — Linux fell through to a naive
+nested loop. The new `-DUSE_OPENBLAS` switch adds an honest dense path,
+which is itself a ~1.9× Linux speedup before any sparse work. Sudoku at
+~1.54M generated tokens (default `model.bin`):
+
+| build | tok/s | Linux speedup vs pre-patch |
+|---|---:|---:|
+| Pre-patch Linux (naive `#else` fallback) |  8,087 | 1.00× |
+| `-DUSE_OPENBLAS` (fair dense)            | 15,273 | 1.89× |
+| `-DUSE_SPARSE_PROJ`                      | 28,306 | **3.50×** |
+
 To replicate:
 
 ```bash
