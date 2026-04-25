@@ -22,11 +22,15 @@
 #ifdef __APPLE__
 #define ACCELERATE_NEW_LAPACK
 #include <Accelerate/Accelerate.h>
+#define HAVE_BLAS 1
+#elif defined(USE_OPENBLAS)
+#include <cblas.h>
+#define HAVE_BLAS 1
 #endif
 
 #include "hull2d_cht.h"
 
-static constexpr int MAX_GEN = 6000000;
+static int MAX_GEN = 6000000;
 
 // ── Model ──────────────────────────────────────────────────────────────
 
@@ -55,6 +59,12 @@ struct SparseMatrix {
     }
 };
 
+#ifdef USE_SPARSE_PROJ
+struct SparseLayer {
+    SparseMatrix qkv, out, fi, fo;
+};
+#endif
+
 struct Model {
     int V, D, L, H, F, stop;
     std::vector<std::string> name;
@@ -62,6 +72,9 @@ struct Model {
     std::vector<double> w;
     const double* emb{};
     std::vector<Layer> ly;
+#ifdef USE_SPARSE_PROJ
+    std::vector<SparseLayer> sly;
+#endif
     const double* head{};
     SparseMatrix head_sp;
     std::vector<std::vector<int>> attn_erase;
@@ -143,6 +156,23 @@ static void load(Model& m, const char* path) {
     m.head_sp.build(m.head, V, D);
     printf("Head sparsity: %d/%d nonzero (%.0f%% sparse)\n",
            m.head_sp.nnz, V * D, 100.0 * (1.0 - (double)m.head_sp.nnz / (V * D)));
+
+#ifdef USE_SPARSE_PROJ
+    m.sly.resize(L);
+    long total_nnz = 0, total_dense = 0;
+    for (int i = 0; i < L; i++) {
+        m.sly[i].qkv.build(m.ly[i].qkv, 3*D, D);
+        m.sly[i].out.build(m.ly[i].out, D,   D);
+        m.sly[i].fi .build(m.ly[i].fi,  2*F, D);
+        m.sly[i].fo .build(m.ly[i].fo,  D,   F);
+        total_nnz   += m.sly[i].qkv.nnz + m.sly[i].out.nnz
+                     + m.sly[i].fi.nnz  + m.sly[i].fo.nnz;
+        total_dense += 3*D*D + D*D + 2*F*D + D*F;
+    }
+    printf("Projection sparsity: %ld/%ld nonzero (%.1f%% sparse)\n",
+           total_nnz, total_dense,
+           100.0 * (1.0 - (double)total_nnz / (double)total_dense));
+#endif
 }
 
 // ── Position encoding ──────────────────────────────────────────────────
@@ -158,7 +188,7 @@ static inline void add_position_encoding(double* x, int pos) {
 static inline void matvec(const double* __restrict__ W,
                            const double* __restrict__ x,
                            double* __restrict__ y, int rows, int cols) {
-#if defined(__APPLE__) && !defined(NO_BLAS)
+#if defined(HAVE_BLAS) && !defined(NO_BLAS)
     cblas_dgemv(CblasRowMajor, CblasNoTrans, rows, cols,
                 1.0, W, cols, x, 1, 0.0, y, 1);
 #else
@@ -170,6 +200,27 @@ static inline void matvec(const double* __restrict__ W,
     }
 #endif
 }
+
+#ifdef USE_SPARSE_PROJ
+// Sparse y = W x  using CSR form. For analytically-constructed weights
+// (sparse by construction), this avoids dense matmul cost over zeros.
+static inline void sparse_matvec(const SparseMatrix& W,
+                                  const double* __restrict__ x,
+                                  double* __restrict__ y) {
+    const int rows = W.rows;
+    const int* __restrict__ ptr = W.ptr.data();
+    const int* __restrict__ col = W.col.data();
+    const double* __restrict__ val = W.val.data();
+    for (int i = 0; i < rows; i++) {
+        double s = 0.0;
+        const int e = ptr[i + 1];
+        for (int k = ptr[i]; k < e; k++) {
+            s += val[k] * x[col[k]];
+        }
+        y[i] = s;
+    }
+}
+#endif
 
 // ── Timing ─────────────────────────────────────────────────────────────
 
@@ -199,6 +250,8 @@ int main(int argc, char** argv) {
         }
         if (strncmp(argv[i], "--args=", 7) == 0) args_str = argv[i] + 7;
         else if (strcmp(argv[i], "--args") == 0 && i + 1 < argc) args_str = argv[++i];
+        else if (strncmp(argv[i], "--max-gen=", 10) == 0) MAX_GEN = atoi(argv[i] + 10);
+        else if (strcmp(argv[i], "--max-gen") == 0 && i + 1 < argc) MAX_GEN = atoi(argv[++i]);
     }
     if (brute) printf("Using brute-force O(n) KV cache\n");
 
@@ -288,9 +341,16 @@ int main(int argc, char** argv) {
 
             for (int l = 0; l < L; l++) {
                 const auto& ly = m.ly[l];
+#ifdef USE_SPARSE_PROJ
+                const auto& sly = m.sly[l];
+#endif
 
                 auto ta = Clock::now();
+#ifdef USE_SPARSE_PROJ
+                sparse_matvec(sly.qkv, x.data(), qkv.data());
+#else
                 matvec(ly.qkv, x.data(), qkv.data(), 3*D, D);
+#endif
                 auto tb = Clock::now();
 
                 double *q = qkv.data(), *k = q + D, *v = k + D;
@@ -308,6 +368,15 @@ int main(int argc, char** argv) {
                 seq++;
                 auto tc = Clock::now();
 
+#ifdef USE_SPARSE_PROJ
+                sparse_matvec(sly.out, ho.data(), ao.data());
+                for (int i = 0; i < D; i++) x[i] += ao[i];
+                sparse_matvec(sly.fi, x.data(), ff.data());
+                for (int i = 0; i < F; i++)
+                    gv[i] = (ff[i] > 0 ? ff[i] : 0.0) * ff[F + i];
+                sparse_matvec(sly.fo, gv.data(), fo.data());
+                for (int i = 0; i < D; i++) x[i] += fo[i];
+#else
                 matvec(ly.out, ho.data(), ao.data(), D, D);
                 for (int i = 0; i < D; i++) x[i] += ao[i];
                 matvec(ly.fi, x.data(), ff.data(), 2*F, D);
@@ -315,6 +384,7 @@ int main(int argc, char** argv) {
                     gv[i] = (ff[i] > 0 ? ff[i] : 0.0) * ff[F + i];
                 matvec(ly.fo, gv.data(), fo.data(), D, F);
                 for (int i = 0; i < D; i++) x[i] += fo[i];
+#endif
                 auto td = Clock::now();
 
                 t_proj += secs(ta, tb) + secs(tc, td);

@@ -1,0 +1,2 @@
+sparsity	naive_tok_s	blas_tok_s	sparse_tok_s	naive_proj_pct	blas_proj_pct	sparse_proj_pct
+0.99	580.0	909.0	29647.0	99.0	98.9	87.1

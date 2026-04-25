@@ -21,3 +21,10 @@ transformer_vm/data/
 
 # C++ build output
 transformer
+
+# Local benchmark artifacts (added on fork)
+/build/
+/data/
+/.venv/
+/transformer
+/model.bin
