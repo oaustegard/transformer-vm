@@ -14,10 +14,19 @@ import sys
 import time
 from pathlib import Path
 
+from model_flops import load_stats, per_token_flops, per_token_theoretical
+
 REPO = Path(__file__).resolve().parent.parent
 DATA = REPO / "data"
 BUILD = REPO / "build"
 RESULTS = REPO / "results"
+
+# Map binary names to the engine identifier model_flops expects.
+BINARY_TO_ENGINE = {
+    "transformer_naive":  "naive",
+    "transformer_blas":   "blas",
+    "transformer_sparse": "sparse",
+}
 
 
 def run_engine(binary: str, model: Path, prog: Path, max_gen: int) -> dict:
@@ -63,11 +72,18 @@ def predicted_tokens(prog: Path) -> list[str]:
 
 
 def fmt(d: dict) -> str:
+    extra = ""
+    if "gflops_effective" in d:
+        extra = (
+            f"  {d['gflops_effective']:>7.4f} GF/tok  "
+            f"{d['tokens_per_gflop']:>8,.1f} tok/GF"
+        )
     return (
         f"  {d['binary']:<22}  "
         f"{d['n_tok']:>4} tok  "
         f"{d['engine_s']:>6.3f}s  "
         f"{d['tok_s']:>10,.0f} tok/s"
+        + extra
     )
 
 
@@ -119,6 +135,10 @@ def main() -> int:
             capture_output=True, text=True, check=True,
         )
 
+        # Introspect model.bin once: shape + per-matrix nnz counts.
+        # Used to compute per-token theoretical / effective FLOPs below.
+        stats = load_stats(model)
+
         # Run each binary `repeats` times; keep the best (lowest engine_s)
         best_per_bin: dict[str, dict] = {}
         ref_tokens_per_bin: dict[str, list[str]] = {}
@@ -128,6 +148,19 @@ def main() -> int:
                 r = run_engine(b, model, prog, args.bench_steps)
                 if best is None or r["engine_s"] < best["engine_s"]:
                     best = r
+            # Annotate with FLOPs columns: theoretical (dense, engine-agnostic)
+            # and effective (engine-aware: sparse skips zeros, hard-attn ~log env).
+            engine = BINARY_TO_ENGINE[b]
+            n_tok = best["n_tok"]
+            theo = per_token_theoretical(stats, n_tok=n_tok,
+                                          prompt_len=args.prog_len)
+            eff  = per_token_flops(stats, engine, n_tok=n_tok,
+                                    prompt_len=args.prog_len)
+            best["gflops_theoretical"] = theo["total"] / 1e9
+            best["gflops_effective"]   = eff["total"] / 1e9
+            best["tokens_per_gflop"]   = (
+                1.0 / best["gflops_effective"] if best["gflops_effective"] > 0 else 0.0
+            )
             best_per_bin[b] = best
             print(fmt(best))
             ref_tokens_per_bin[b] = predicted_tokens(prog)
@@ -166,12 +199,22 @@ def main() -> int:
             "naive_tok_s": naive_ts,
             "blas_tok_s": blas_ts,
             "sparse_tok_s": sparse_ts,
+            # FLOP-normalized columns. theoretical is the same across engines
+            # (depends only on dims), so we record one value.
+            "gflops_theoretical":      best_per_bin["transformer_naive"]["gflops_theoretical"],
+            "naive_gflops_effective":  best_per_bin["transformer_naive"]["gflops_effective"],
+            "blas_gflops_effective":   best_per_bin["transformer_blas"]["gflops_effective"],
+            "sparse_gflops_effective": best_per_bin["transformer_sparse"]["gflops_effective"],
+            "naive_tokens_per_gflop":  best_per_bin["transformer_naive"]["tokens_per_gflop"],
+            "blas_tokens_per_gflop":   best_per_bin["transformer_blas"]["tokens_per_gflop"],
+            "sparse_tokens_per_gflop": best_per_bin["transformer_sparse"]["tokens_per_gflop"],
         })
 
     # Summary table
     print("━━━━━━━━━━━━━━━━━━━━ summary ━━━━━━━━━━━━━━━━━━━━")
     print(f"  {'sparsity':>9}  {'naive':>10}  {'BLAS':>10}  {'sparse':>10}    "
-          f"{'sp/naive':>8}  {'sp/BLAS':>8}")
+          f"{'sp/naive':>8}  {'sp/BLAS':>8}    "
+          f"{'GF/tok(th)':>10}  {'sp GF/tok':>9}  {'sp tok/GF':>10}")
     for r in summary_rows:
         print(
             f"  {r['sparsity']:>8.0%}  "
@@ -179,14 +222,27 @@ def main() -> int:
             f"{r['blas_tok_s']:>10,.0f}  "
             f"{r['sparse_tok_s']:>10,.0f}    "
             f"{r['sparse_tok_s']/r['naive_tok_s']:>7.2f}×  "
-            f"{r['sparse_tok_s']/r['blas_tok_s']:>7.2f}×"
+            f"{r['sparse_tok_s']/r['blas_tok_s']:>7.2f}×    "
+            f"{r['gflops_theoretical']:>10.4f}  "
+            f"{r['sparse_gflops_effective']:>9.4f}  "
+            f"{r['sparse_tokens_per_gflop']:>10,.1f}"
         )
 
-    # Persist as TSV
+    # Persist as TSV (header bumped — old rows are missing the new columns).
+    cols = [
+        "sparsity",
+        "naive_tok_s", "blas_tok_s", "sparse_tok_s",
+        "gflops_theoretical",
+        "naive_gflops_effective", "blas_gflops_effective", "sparse_gflops_effective",
+        "naive_tokens_per_gflop", "blas_tokens_per_gflop", "sparse_tokens_per_gflop",
+    ]
     with (RESULTS / "sweep.tsv").open("w") as f:
-        f.write("sparsity\tnaive_tok_s\tblas_tok_s\tsparse_tok_s\n")
+        f.write("\t".join(cols) + "\n")
         for r in summary_rows:
-            f.write(f"{r['sparsity']}\t{r['naive_tok_s']}\t{r['blas_tok_s']}\t{r['sparse_tok_s']}\n")
+            f.write("\t".join(
+                f"{r[c]:.6f}" if isinstance(r[c], float) else str(r[c])
+                for c in cols
+            ) + "\n")
     print(f"\n  → results written to {RESULTS / 'sweep.tsv'}")
     return 0
 
