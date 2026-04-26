@@ -40,6 +40,11 @@ struct SparseMatrix {
     std::vector<double> val;
     std::vector<int>    col;
     std::vector<int>    ptr;  // ptr[i] = start of row i in val/col
+    // For bounded-argmax (head): row_l1[i] = sum_t |val[t]| over row i.
+    // Then |W[i] . x| <= row_l1[i] * ||x||_inf, so rows visited in
+    // descending row_l1 order can be pruned once row_l1[i]*x_inf < bs.
+    std::vector<double> row_l1;
+    std::vector<int>    row_order;
     int rows = 0, cols = 0, nnz = 0;
 
     void build(const double* dense, int r, int c) {
@@ -56,6 +61,22 @@ struct SparseMatrix {
             }
         }
         ptr[r] = nnz;
+
+        row_l1.assign(r, 0.0);
+        for (int i = 0; i < r; i++) {
+            double s = 0.0;
+            for (int k = ptr[i]; k < ptr[i + 1]; k++) s += std::fabs(val[k]);
+            row_l1[i] = s;
+        }
+        row_order.resize(r);
+        for (int i = 0; i < r; i++) row_order[i] = i;
+        // Sort by row_l1 descending; ties broken by row id ascending so the
+        // bounded loop prefers smaller vocab ids when prefix scans are equal.
+        std::sort(row_order.begin(), row_order.end(),
+                  [this](int a, int b) {
+                      if (row_l1[a] != row_l1[b]) return row_l1[a] > row_l1[b];
+                      return a < b;
+                  });
     }
 };
 
@@ -276,6 +297,7 @@ int main(int argc, char** argv) {
     double total_time = 0;
 #ifdef PROFILE_PHASES
     double t_embed = 0, t_qkv = 0, t_attn = 0, t_out = 0, t_ffn = 0, t_head = 0;
+    long head_calls = 0, head_rows_visited = 0;
 #endif
 
     for (int ai = 2; ai < argc; ai++) {
@@ -417,15 +439,33 @@ int main(int argc, char** argv) {
             if (pos + 1 == (int)ids.size()) {
                 PHASE_TS(th0);
                 const auto& sp = m.head_sp;
+                // Bounded argmax: rows are pre-sorted by row_l1 descending.
+                // For row i, |W[i] . x| <= row_l1[i] * x_inf. Once that bound
+                // dips below the running best score, no later row can match,
+                // so we break. Tie-breaking matches the original (smallest
+                // vocab id wins) via the (s == bs && i < best) clause.
+                double x_inf = 0.0;
+                for (int j = 0; j < D; j++) {
+                    double a = std::fabs(x[j]);
+                    if (a > x_inf) x_inf = a;
+                }
                 int best = 0; double bs = -1e300;
-                for (int i = 0; i < sp.rows; i++) {
+                int rank = 0;
+                for (; rank < sp.rows; rank++) {
+                    int i = sp.row_order[rank];
+                    double bound = sp.row_l1[i] * x_inf;
+                    if (bound < bs) break;
                     double s = 0;
                     for (int k = sp.ptr[i]; k < sp.ptr[i + 1]; k++)
                         s += sp.val[k] * x[sp.col[k]];
-                    if (s > bs) { bs = s; best = i; }
+                    if (s > bs || (s == bs && i < best)) { bs = s; best = i; }
                 }
                 PHASE_TS(th1);
                 PHASE_ADD(t_head, th0, th1);
+#ifdef PROFILE_PHASES
+                head_calls++;
+                head_rows_visited += rank;
+#endif
                 ids.push_back(best);
 
                 if (trace_every > 0) {
@@ -572,6 +612,12 @@ int main(int argc, char** argv) {
                t_head,  100*t_head /total_time,
                t_misc,  100*t_misc /total_time,
                t_proj,  100*t_proj /total_time);
+        if (head_calls > 0) {
+            double avg_rows = (double)head_rows_visited / head_calls;
+            printf("  head:  %ld calls, %ld rows visited, %.1f avg/call (%.1f%% of %d)\n",
+                   head_calls, head_rows_visited, avg_rows,
+                   100.0 * avg_rows / m.head_sp.rows, m.head_sp.rows);
+        }
 #endif
     }
     return failed ? 1 : 0;
