@@ -24,9 +24,6 @@
 #include <Accelerate/Accelerate.h>
 #define HAVE_BLAS 1
 #elif defined(USE_OPENBLAS)
-#include <cblas.h>
-#define HAVE_BLAS 1
-#elif __has_include(<cblas.h>)
 extern "C" {
 #include <cblas.h>
 }
@@ -655,7 +652,11 @@ int main(int argc, char** argv) {
             int vseq_base = vseq;
             #pragma omp parallel for schedule(static)
             for (int h = 0; h < H; h++) {
+#ifdef NO_HEAD_BYPASS
+                int ht = 0;  // ablation: force every head through the hull
+#else
                 int ht = (!m.head_type.empty()) ? m.head_type[l][h] : 0;
+#endif
                 if (ht == 1) {
                     // Passthrough: output = V[t].
                     for (int t = 0; t < T; t++) {
