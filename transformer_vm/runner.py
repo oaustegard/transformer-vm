@@ -113,6 +113,16 @@ def _build_cpp_engine():
         ]
     else:
         cmd = ["g++", "-std=c++17", "-O3", "-I", attn_dir, source, "-o", binary]
+        # Opt into OpenBLAS for the matvec path if cblas.h is discoverable.
+        # Falls back silently to the scalar nested loop when not installed.
+        try:
+            pkg = subprocess.run(
+                ["pkg-config", "--cflags", "--libs", "openblas"],
+                capture_output=True, text=True, check=True,
+            )
+            cmd += ["-DUSE_OPENBLAS"] + pkg.stdout.split()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
     try:
         subprocess.check_call(cmd)
         logger.info("[engine] Built: %s", binary)

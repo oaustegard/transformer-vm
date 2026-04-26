@@ -22,6 +22,8 @@
 #ifdef __APPLE__
 #define ACCELERATE_NEW_LAPACK
 #include <Accelerate/Accelerate.h>
+#elif defined(USE_OPENBLAS)
+#include <cblas.h>
 #endif
 
 #include "hull2d_cht.h"
@@ -158,7 +160,7 @@ static inline void add_position_encoding(double* x, int pos) {
 static inline void matvec(const double* __restrict__ W,
                            const double* __restrict__ x,
                            double* __restrict__ y, int rows, int cols) {
-#if defined(__APPLE__) && !defined(NO_BLAS)
+#if (defined(__APPLE__) || defined(USE_OPENBLAS)) && !defined(NO_BLAS)
     cblas_dgemv(CblasRowMajor, CblasNoTrans, rows, cols,
                 1.0, W, cols, x, 1, 0.0, y, 1);
 #else
