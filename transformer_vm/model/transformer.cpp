@@ -250,6 +250,7 @@ int main(int argc, char** argv) {
 
     bool regen = false, brute = false;
     int trace_every = 0;
+    long diag_at = -1;  // absolute pos in ids[] at which to emit DIAG line; -1 disables
     const char* args_str = nullptr;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--regen") == 0) regen = true;
@@ -262,6 +263,8 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--args") == 0 && i + 1 < argc) args_str = argv[++i];
         else if (strncmp(argv[i], "--max-gen=", 10) == 0) MAX_GEN = atoi(argv[i] + 10);
         else if (strcmp(argv[i], "--max-gen") == 0 && i + 1 < argc) MAX_GEN = atoi(argv[++i]);
+        else if (strncmp(argv[i], "--diag-at=", 10) == 0) diag_at = atol(argv[i] + 10);
+        else if (strcmp(argv[i], "--diag-at") == 0 && i + 1 < argc) diag_at = atol(argv[++i]);
     }
     if (brute) printf("Using brute-force O(n) KV cache\n");
 
@@ -344,6 +347,15 @@ int main(int argc, char** argv) {
         std::vector<double> x(D), qkv(3*D), ho(D), ao(D),
                             ff(2*F), gv(F), fo(D), logits(m.V);
 
+        // Issue #10: when --diag-at=N is set, the forward pass at pos=N-1
+        // (the step that emits ids[N]) populates this buffer with each
+        // (layer, head)'s attention argmax key kx. Comparing this between
+        // engines tells us whether divergence at token N originates from
+        // attention picking a different historical key (attn_argmax) or
+        // from head logits flipping with no upstream attn flip (head_argmax).
+        std::vector<double> diag_kx(L * H, 0.0);
+        bool diag_armed = (diag_at >= 0);
+
         printf("%s: ", test.c_str()); fflush(stdout);
         auto t0 = Clock::now();
 
@@ -371,14 +383,16 @@ int main(int argc, char** argv) {
 
                 double *q = qkv.data(), *k = q + D, *v = k + D;
                 int base = l * H;
+                bool capture = diag_armed && (long)pos == diag_at - 1;
                 for (int h = 0; h < H; h++) {
                     TieBreak tb = (!m.head_tb.empty()) ? m.head_tb[l][h] : TieBreak::AVERAGE;
+                    double* kx_out = capture ? &diag_kx[base + h] : nullptr;
                     if (brute) {
                         brutes[base+h].insert(&k[h*2], &v[h*2], seq);
-                        brutes[base+h].query(&q[h*2], tb, &ho[h*2]);
+                        brutes[base+h].query(&q[h*2], tb, &ho[h*2], kx_out);
                     } else {
                         hulls[base+h].insert(&k[h*2], &v[h*2], seq);
-                        hulls[base+h].query(&q[h*2], tb, &ho[h*2]);
+                        hulls[base+h].query(&q[h*2], tb, &ho[h*2], kx_out);
                     }
                 }
                 seq++;
@@ -418,14 +432,34 @@ int main(int argc, char** argv) {
                 PHASE_TS(th0);
                 const auto& sp = m.head_sp;
                 int best = 0; double bs = -1e300;
+                int second = -1; double ss = -1e300;
+                bool diag_now = diag_armed && (long)(pos + 1) == diag_at;
                 for (int i = 0; i < sp.rows; i++) {
                     double s = 0;
                     for (int k = sp.ptr[i]; k < sp.ptr[i + 1]; k++)
                         s += sp.val[k] * x[sp.col[k]];
-                    if (s > bs) { bs = s; best = i; }
+                    if (s > bs) { ss = bs; second = best; bs = s; best = i; }
+                    else if (diag_now && s > ss)   { ss = s; second = i; }
                 }
                 PHASE_TS(th1);
                 PHASE_ADD(t_head, th0, th1);
+
+                if (diag_now) {
+                    // One self-contained line per engine run, picked up by
+                    // scripts/divergence_horizon.py for cause attribution.
+                    fprintf(stderr,
+                            "DIAG\t%s\t%ld\t%d\t%d\t%.17g\t%.17g",
+                            test.c_str(), diag_at, best, second, bs, ss);
+                    for (int lh = 0; lh < L * H; lh++)
+                        fprintf(stderr, "\t%.17g", diag_kx[lh]);
+                    fprintf(stderr, "\n");
+                    fflush(stderr);
+                    // No reason to keep running — caller only needs this
+                    // single diagnostic line. Saves O(max_gen - diag_at)
+                    // wasted work in the cause-attribution pass.
+                    return 0;
+                }
+
                 ids.push_back(best);
 
                 if (trace_every > 0) {

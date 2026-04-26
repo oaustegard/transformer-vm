@@ -427,12 +427,17 @@ struct HardAttentionHead {
         n++;
     }
 
-    bool query(const double q[2], TieBreak tb, double out[2]) const {
+    bool query(const double q[2], TieBreak tb, double out[2],
+               double* best_kx_out = nullptr) const {
         double qx = q[0], qy = q[1];
         if (qy == 0.0) {
             if (qx > 0.0)      right_meta.resolve(tb, out);
             else if (qx < 0.0) left_meta.resolve(tb, out);
             else                global.resolve(tb, out);
+            // Boundary case has no envelope line; expose query sign so the
+            // diag stream still distinguishes left/right/zero branches.
+            if (best_kx_out) *best_kx_out = (qx > 0.0) ? max_kx
+                                          : (qx < 0.0) ? min_kx : 0.0;
             return true;
         }
 
@@ -440,6 +445,7 @@ struct HardAttentionHead {
         bool found = false;
         if (qy > 0.0) found = upper.query(qx, qy, tb, out, &score, &best_kx);
         else               found = lower.query(qx, qy, tb, out, &score, &best_kx);
+        if (best_kx_out) *best_kx_out = best_kx;
 
         return found;
     }
@@ -463,7 +469,8 @@ struct BruteAttentionHead {
         entries.push_back({key[0], key[1], val[0], val[1], seq});
     }
 
-    bool query(const double q[2], TieBreak tb, double out[2]) const {
+    bool query(const double q[2], TieBreak tb, double out[2],
+               double* best_kx_out = nullptr) const {
         if (entries.empty()) { out[0] = out[1] = 0; return false; }
 
         double qx = q[0], qy = q[1];
@@ -483,6 +490,7 @@ struct BruteAttentionHead {
             }
         }
         meta.resolve(tb, out);
+        if (best_kx_out) *best_kx_out = best_kx;
 
         return true;
     }
