@@ -18,9 +18,17 @@ import sys
 import time
 from pathlib import Path
 
+from model_flops import load_stats, per_token_flops, per_token_theoretical
+
 REPO = Path(__file__).resolve().parent.parent
 BUILD = REPO / "build"
 RESULTS = REPO / "results"
+
+BINARY_TO_ENGINE = {
+    "transformer_naive":  "naive",
+    "transformer_blas":   "blas",
+    "transformer_sparse": "sparse",
+}
 
 
 def run_engine(binary: str, model: Path, prog: Path, max_gen: int) -> dict:
@@ -63,11 +71,21 @@ def predicted_tokens(prog: Path) -> list[str]:
 
 
 def fmt(d: dict) -> str:
+    extra = ""
+    if "gflops_effective" in d:
+        # GF/s eff = effective work per token × tok/s. The substrate-fair
+        # axis: how productively the engine converts compute time into
+        # useful FLOPs (issue #9).
+        extra = (
+            f"  {d['gflops_effective']:>8.6f} GF/tok  "
+            f"{d['effective_gflops_per_s']:>6.2f} GF/s"
+        )
     return (
         f"  {d['binary']:<22}  "
         f"{d['n_tok']:>6} tok  "
         f"{d['engine_s']:>7.3f}s  "
         f"{d['tok_s']:>10,.0f} tok/s"
+        + extra
     )
 
 
@@ -92,9 +110,22 @@ def main() -> int:
         if not (BUILD / b).exists():
             sys.exit(f"missing binary: {BUILD / b}. Build first.")
 
+    # Introspect the model once for FLOP estimates (#9). prompt_len defaults
+    # to 0 here — bench_real reads token streams from disk and we don't know
+    # the prefix length without parsing the .txt; the head amortization error
+    # from this is small for long runs.
+    stats = load_stats(args.model)
+    prog_text = args.prog.read_text().split()
+    prompt_len = len(prog_text)
+
     RESULTS.mkdir(exist_ok=True)
-    print(f"\nmodel:   {args.model}")
-    print(f"program: {args.prog}")
+    print(f"\nmodel:   {args.model}  (V={stats.shape.V} D={stats.shape.D} "
+          f"L={stats.shape.L} H={stats.shape.H} F={stats.shape.F})")
+    print(f"  proj nnz {stats.total_proj_nnz:,}/{stats.total_proj_dense:,} "
+          f"({100*(1 - stats.total_proj_nnz/stats.total_proj_dense):.1f}% sparse), "
+          f"head nnz {stats.head_nnz:,}/{stats.shape.V*stats.shape.D:,} "
+          f"({100*(1 - stats.head_nnz/(stats.shape.V*stats.shape.D)):.1f}% sparse)")
+    print(f"program: {args.prog} ({prompt_len} prompt tokens)")
     print(f"max-gen: {args.max_gen}    repeats: {args.repeats}\n")
 
     best_per_bin: dict[str, dict] = {}
@@ -115,6 +146,18 @@ def main() -> int:
             if best is None or r["engine_s"] < best["engine_s"]:
                 best = r
                 best_ref = predicted_tokens(args.prog)
+        # Annotate with FLOPs columns (issue #9).
+        engine = BINARY_TO_ENGINE[b]
+        eff = per_token_flops(stats, engine, n_tok=best["n_tok"],
+                               prompt_len=prompt_len)
+        theo = per_token_theoretical(stats, n_tok=best["n_tok"],
+                                      prompt_len=prompt_len)
+        best["gflops_effective"]      = eff["total"] / 1e9
+        best["gflops_theoretical"]    = theo["total"] / 1e9
+        best["effective_gflops_per_s"] = best["gflops_effective"] * best["tok_s"]
+        best["tokens_per_gflop"]      = (
+            1.0 / best["gflops_effective"] if best["gflops_effective"] > 0 else 0.0
+        )
         best_per_bin[b] = best
         ref_tokens_per_bin[b] = best_ref
         # Stash ref under a per-binary name so subsequent --regen overwrites
@@ -142,24 +185,31 @@ def main() -> int:
                     f"{a[mm]!r} vs {ref_naive[mm]!r} (len {len(a)} vs {len(ref_naive)})"
                 )
 
-    naive_ts = best_per_bin["transformer_naive"]["tok_s"]
-    blas_ts = best_per_bin["transformer_blas"]["tok_s"]
-    sparse_ts = best_per_bin["transformer_sparse"]["tok_s"]
-    print(f"\n  → sparse vs naive: {sparse_ts/naive_ts:.2f}×")
-    print(f"  → sparse vs BLAS:  {sparse_ts/blas_ts:.2f}×")
+    naive_r = best_per_bin["transformer_naive"]
+    blas_r  = best_per_bin["transformer_blas"]
+    sparse_r = best_per_bin["transformer_sparse"]
+    print(f"\n  → sparse vs naive (tok/s): {sparse_r['tok_s']/naive_r['tok_s']:.2f}×")
+    print(f"  → sparse vs BLAS  (tok/s): {sparse_r['tok_s']/blas_r['tok_s']:.2f}×")
+    print(f"  → sparse hardware utilization vs BLAS: "
+          f"{sparse_r['effective_gflops_per_s']/blas_r['effective_gflops_per_s']:.2f}×  "
+          f"(sparse {sparse_r['effective_gflops_per_s']:.2f} GF/s vs "
+          f"BLAS {blas_r['effective_gflops_per_s']:.2f} GF/s)")
 
     out_tsv = RESULTS / f"real_model_{args.label}.tsv"
+    cols = ["binary", "n_tok", "n_ops", "engine_s", "tok_s",
+            "gflops_theoretical", "gflops_effective",
+            "effective_gflops_per_s", "tokens_per_gflop"]
     with out_tsv.open("w") as f:
-        f.write("binary\tn_tok\tn_ops\tengine_s\ttok_s\n")
+        f.write("\t".join(cols) + "\n")
         for b in binaries:
             r = best_per_bin[b]
-            f.write(
-                f"{b}\t{r['n_tok']}\t{r['n_ops']}\t{r['engine_s']:.4f}\t"
-                f"{r['tok_s']:.1f}\n"
-            )
+            f.write("\t".join(
+                f"{r[c]:.6f}" if isinstance(r[c], float) else str(r[c])
+                for c in cols
+            ) + "\n")
         f.write(
-            f"# sparse_vs_naive\t{sparse_ts/naive_ts:.4f}\t"
-            f"sparse_vs_blas\t{sparse_ts/blas_ts:.4f}\t"
+            f"# sparse_vs_naive\t{sparse_r['tok_s']/naive_r['tok_s']:.4f}\t"
+            f"sparse_vs_blas\t{sparse_r['tok_s']/blas_r['tok_s']:.4f}\t"
             f"identical_streams\t{ref_tokens_per_bin['transformer_blas'] == ref_naive and ref_tokens_per_bin['transformer_sparse'] == ref_naive}\n"
         )
     print(f"\n  → results written to {out_tsv}")

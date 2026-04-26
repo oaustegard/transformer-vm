@@ -1,5 +1,5 @@
-binary	n_tok	n_ops	engine_s	tok_s
-transformer_naive	24071	4443	1.2100	19849.0
-transformer_blas	24071	4443	0.7800	30903.0
-transformer_sparse	24071	4443	0.5300	45476.0
-# sparse_vs_naive	2.2911	sparse_vs_blas	1.4716	identical_streams	True
+binary	n_tok	n_ops	engine_s	tok_s	gflops_theoretical	gflops_effective	effective_gflops_per_s	tokens_per_gflop
+transformer_naive	9071	1103	0.430000	20941.000000	0.000218	0.000186	3.891441	5381.297066
+transformer_blas	9071	1103	0.270000	34221.000000	0.000218	0.000186	6.359248	5381.297066
+transformer_sparse	9071	1103	0.180000	49594.000000	0.000218	0.000032	1.596074	31072.494103
+# sparse_vs_naive	2.3683	sparse_vs_blas	1.4492	identical_streams	True
