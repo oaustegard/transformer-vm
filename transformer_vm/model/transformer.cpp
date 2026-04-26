@@ -443,6 +443,21 @@ int main(int argc, char** argv) {
             }
         }
 
+#ifdef PROFILE_PHASES
+        // Issue #7: dump per-head final envelope sizes (upper, lower) to stderr.
+        // Prefixed lines are picked up by scripts/measure_envelope_sizes.py.
+        if (!brute) {
+            for (int l = 0; l < L; l++) {
+                for (int h = 0; h < H; h++) {
+                    int idx = l * H + h;
+                    fprintf(stderr, "ENVELOPE\t%s\t%d\t%d\t%d\t%d\n",
+                            test.c_str(), l, h,
+                            hulls[idx].upper.size(), hulls[idx].lower.size());
+                }
+            }
+        }
+#endif
+
         auto t1 = Clock::now();
         double dt = secs(t0, t1);
         int nt = (int)ids.size(), no = 0;
