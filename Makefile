@@ -39,11 +39,21 @@ all:     default blas
 $(BUILD):
 	@mkdir -p $@
 
+# On Linux, libraries must follow their users on the link line for
+# --as-needed resolution. macOS is order-insensitive.
+ifeq ($(UNAME_S),Darwin)
+  BLAS_DEFS := -DUSE_OPENBLAS
+  BLAS_LIBS := $(BLAS_FLAGS)
+else
+  BLAS_DEFS := -DUSE_OPENBLAS
+  BLAS_LIBS := -lopenblas
+endif
+
 $(BUILD)/transformer_naive: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) $< -o $@
 
 $(BUILD)/transformer_blas: $(SRC) | $(BUILD)
-	$(CXX) $(COMMON) $(BLAS_FLAGS) $< -o $@
+	$(CXX) $(COMMON) $(BLAS_DEFS) $< -o $@ $(BLAS_LIBS)
 
 $(BUILD)/transformer_sparse: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) -DUSE_SPARSE_PROJ $< -o $@
@@ -52,7 +62,7 @@ $(BUILD)/transformer_naive_prof: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(PROF) $< -o $@
 
 $(BUILD)/transformer_blas_prof: $(SRC) | $(BUILD)
-	$(CXX) $(COMMON) $(PROF) $(BLAS_FLAGS) $< -o $@
+	$(CXX) $(COMMON) $(PROF) $(BLAS_DEFS) $< -o $@ $(BLAS_LIBS)
 
 $(BUILD)/transformer_sparse_prof: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(PROF) -DUSE_SPARSE_PROJ $< -o $@

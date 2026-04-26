@@ -1,0 +1,25 @@
+program	engine_a	engine_b	model_config	first_diverging_token	total_tokens_compared	divergence_cause	len_a	len_b	tok_a	tok_b	wall_a_s	wall_b_s
+collatz	naive	blas	default	-1	6103	none	6103	6103			0.7	0.4
+collatz	naive	sparse	default	-1	6103	none	6103	6103			0.5	0.2
+collatz	blas	sparse	default	-1	6103	none	6103	6103			0.3	0.2
+min_cost_matching	naive	blas	default	-1	40171	none	40171	40171			4.9	2.6
+min_cost_matching	naive	sparse	default	-1	40171	none	40171	40171			3.6	1.4
+min_cost_matching	blas	sparse	default	-1	40171	none	40171	40171			2.6	1.4
+sudoku	naive	blas	default	1671695	2037473	attn_argmax	2037473	2037473	03	df	184.0	178.0
+sudoku	naive	sparse	default	-1	2037473	none	2037473	2037473			184.0	92.0
+sudoku	blas	sparse	default	1671695	2037473	attn_argmax	2037473	2037473	df	03	178.0	92.0
+collatz	naive	blas	max_ffn_32	-1	6103	none	6103	6103			0.7	0.3
+collatz	naive	sparse	max_ffn_32	-1	6103	none	6103	6103			0.2	0.1
+collatz	blas	sparse	max_ffn_32	-1	6103	none	6103	6103			0.3	0.1
+min_cost_matching	naive	blas	max_ffn_32	-1	40171	none	40171	40171			4.7	2.5
+min_cost_matching	naive	sparse	max_ffn_32	-1	40171	none	40171	40171			4.7	1.2
+min_cost_matching	blas	sparse	max_ffn_32	-1	40171	none	40171	40171			2.5	1.2
+sudoku	naive	blas	max_ffn_32	1671695	2037473	attn_argmax	2037473	2037473	03	df	175.0	170.0
+sudoku	naive	sparse	max_ffn_32	-1	2037473	none	2037473	2037473			175.0	95.0
+sudoku	blas	sparse	max_ffn_32	1671695	2037473	attn_argmax	2037473	2037473	df	03	170.0	95.0
+collatz	naive	blas	no_reuse	-1	6103	none	6103	6103			3.6	1.5
+collatz	naive	sparse	no_reuse	-1	6103	none	6103	6103			3.6	0.4
+collatz	blas	sparse	no_reuse	-1	6103	none	6103	6103			1.5	0.4
+min_cost_matching	naive	blas	no_reuse	-1	40171	none	40171	40171			20.2	10.0
+min_cost_matching	naive	sparse	no_reuse	-1	40171	none	40171	40171			20.2	2.4
+min_cost_matching	blas	sparse	no_reuse	-1	40171	none	40171	40171			10.0	2.4
