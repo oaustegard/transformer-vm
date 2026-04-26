@@ -1,0 +1,36 @@
+=== hello ===
+Determinism check on hello.txt
+
+binary                        run1==run2  vs naive
+----------------------------------------------------------------
+transformer_naive             OK        match
+transformer_sparse            OK        match
+transformer_blas              OK        match
+transformer_blas_nobypass     OK        match
+=== addition ===
+Determinism check on addition.txt
+
+binary                        run1==run2  vs naive
+----------------------------------------------------------------
+transformer_naive             OK        match
+transformer_sparse            OK        match
+transformer_blas              OK        match
+transformer_blas_nobypass     OK        match
+=== collatz ===
+Determinism check on collatz.txt
+
+binary                        run1==run2  vs naive
+----------------------------------------------------------------
+transformer_naive             OK        match
+transformer_sparse            OK        match
+transformer_blas              OK        match
+transformer_blas_nobypass     OK        match
+=== min_cost_matching ===
+Determinism check on min_cost_matching.txt
+
+binary                        run1==run2  vs naive
+----------------------------------------------------------------
+transformer_naive             OK        match
+transformer_sparse            OK        match
+transformer_blas              OK        match
+transformer_blas_nobypass     OK        match

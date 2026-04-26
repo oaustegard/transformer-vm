@@ -19,15 +19,20 @@ PROF     := -DPROFILE_PHASES
 
 UNAME_S  := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
-  BLAS_FLAGS := -framework Accelerate
+  BLAS_DEFS := -DUSE_OPENBLAS
+  BLAS_LIBS := -framework Accelerate
+  OMP_FLAGS := -Xclang -fopenmp -lomp
 else
-  BLAS_FLAGS := -DUSE_OPENBLAS -lopenblas
+  BLAS_DEFS := -DUSE_OPENBLAS
+  BLAS_LIBS := -lopenblas
+  OMP_FLAGS := -fopenmp
 endif
 
 BINS_DEFAULT := \
     $(BUILD)/transformer_naive  $(BUILD)/transformer_sparse \
     $(BUILD)/transformer_naive_prof  $(BUILD)/transformer_sparse_prof
-BINS_BLAS    := $(BUILD)/transformer_blas $(BUILD)/transformer_blas_prof
+BINS_BLAS    := $(BUILD)/transformer_blas $(BUILD)/transformer_blas_prof \
+                $(BUILD)/transformer_blas_nobypass
 BINS_PROF    := $(BUILD)/transformer_naive_prof $(BUILD)/transformer_sparse_prof
 
 .PHONY: default all blas profile clean
@@ -39,21 +44,18 @@ all:     default blas
 $(BUILD):
 	@mkdir -p $@
 
-# On Linux, libraries must follow their users on the link line for
-# --as-needed resolution. macOS is order-insensitive.
-ifeq ($(UNAME_S),Darwin)
-  BLAS_DEFS := -DUSE_OPENBLAS
-  BLAS_LIBS := $(BLAS_FLAGS)
-else
-  BLAS_DEFS := -DUSE_OPENBLAS
-  BLAS_LIBS := -lopenblas
-endif
-
 $(BUILD)/transformer_naive: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) $< -o $@
 
+# trulite PR #1 + PR #2: dgemm batched verify, parallel hull (OpenMP),
+# head-type bypass for passthrough/gather heads.
 $(BUILD)/transformer_blas: $(SRC) | $(BUILD)
-	$(CXX) $(COMMON) $(BLAS_DEFS) $< -o $@ $(BLAS_LIBS)
+	$(CXX) $(COMMON) $(BLAS_DEFS) $(OMP_FLAGS) $< -o $@ $(BLAS_LIBS)
+
+# Ablation: dgemm + parallel hull, but ignore head_type metadata
+# (every head goes through the hull, even passthrough/gather).
+$(BUILD)/transformer_blas_nobypass: $(SRC) | $(BUILD)
+	$(CXX) $(COMMON) $(BLAS_DEFS) -DNO_HEAD_BYPASS $(OMP_FLAGS) $< -o $@ $(BLAS_LIBS)
 
 $(BUILD)/transformer_sparse: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) -DUSE_SPARSE_PROJ $< -o $@
@@ -62,7 +64,7 @@ $(BUILD)/transformer_naive_prof: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(PROF) $< -o $@
 
 $(BUILD)/transformer_blas_prof: $(SRC) | $(BUILD)
-	$(CXX) $(COMMON) $(PROF) $(BLAS_DEFS) $< -o $@ $(BLAS_LIBS)
+	$(CXX) $(COMMON) $(PROF) $(BLAS_DEFS) $(OMP_FLAGS) $< -o $@ $(BLAS_LIBS)
 
 $(BUILD)/transformer_sparse_prof: $(SRC) | $(BUILD)
 	$(CXX) $(COMMON) $(PROF) -DUSE_SPARSE_PROJ $< -o $@
