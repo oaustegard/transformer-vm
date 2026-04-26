@@ -95,6 +95,7 @@ def main() -> int:
     binary = BUILD / args.binary
     if not binary.exists():
         print(f"missing binary: {binary}")
+        print("hint: run `make profile` to build the *_prof binaries")
         return 1
 
     RESULTS.mkdir(exist_ok=True)

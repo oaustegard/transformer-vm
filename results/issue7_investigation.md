@@ -161,10 +161,7 @@ uv run wasm-reference data/collatz.txt
 uv run wasm-reference data/min_cost_matching.txt
 uv run wasm-reference data/sudoku.txt
 
-ATTN=transformer_vm/attention; SRC=transformer_vm/model/transformer.cpp
-COM="-std=c++17 -O3 -march=native -I $ATTN"
-g++ $COM -DPROFILE_PHASES                  $SRC -o build/transformer_naive_prof
-g++ $COM -DPROFILE_PHASES -DUSE_SPARSE_PROJ $SRC -o build/transformer_sparse_prof
+make profile
 
 uv run python scripts/measure_envelope_sizes.py --max-gen 20000
 ```

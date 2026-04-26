@@ -250,12 +250,15 @@ engine with `-DUSE_SPARSE_PROJ` replaces the four per-layer dense matvecs
 (qkv, out, fi, fo) with CSR sparse matvecs.
 
 ```bash
-ATTN=transformer_vm/attention; SRC=transformer_vm/model/transformer.cpp
-COM="-std=c++17 -O3 -march=native -I $ATTN"
-g++ $COM                   $SRC -o build/transformer_naive
-g++ $COM -DUSE_OPENBLAS    $SRC -o build/transformer_blas -lopenblas      # Linux
-g++ $COM -DUSE_SPARSE_PROJ $SRC -o build/transformer_sparse
+make           # naive, sparse, and their *_prof variants (no extra deps)
+make blas      # blas + blas_prof (Linux: needs libopenblas-dev; macOS: ok)
+make profile   # just the *_prof variants (PROFILE_PHASES enabled)
+make all       # everything
 ```
+
+`*_prof` binaries are built with `-DPROFILE_PHASES`, which enables
+per-phase timers and the per-(layer, head) `ENVELOPE` dump consumed by
+`scripts/profile_phases.py` and `scripts/measure_envelope_sizes.py`.
 
 Synthetic-weight crossover is at ~75% sparsity (`results/sweep.tsv`).
 Real `model.bin` from `transformer_vm.build` lives well above that:

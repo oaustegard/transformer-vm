@@ -83,6 +83,11 @@ def main() -> int:
         ("min_cost_matching",  args.progs / "min_cost_matching.txt"),
     ]
     binaries = ["transformer_naive_prof", "transformer_blas_prof", "transformer_sparse_prof"]
+    missing = [b for b in binaries if not (BUILD / b).exists()]
+    if missing:
+        print(f"missing binaries: {', '.join(missing)}")
+        print("hint: run `make profile` (or `make all` to also build blas)")
+        return 1
 
     RESULTS.mkdir(exist_ok=True)
     rows: list[dict] = []
